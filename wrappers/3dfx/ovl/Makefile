@@ -1,4 +1,4 @@
-WATCOM_PATH=/home/crono/openwatcom-v2/binl64
+WATCOM_PATH=/opt/watcom11/binl64
 WCC=$(WATCOM_PATH)/wcc386
 WLD=$(WATCOM_PATH)/wlink
 QEMU_SRC_DIR=..\..\..\qemu-0
