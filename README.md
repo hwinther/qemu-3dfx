@@ -8,9 +8,9 @@ KJ Liew \<liewkj@yahoo.com\>
     wrappers/3dfx       - Glide wrappers for supported guest OS/environment (DOS/Windows/DJGPP/Linux)
     wrappers/mesa       - MESA GL wrapper for supported guest OS/environment (Windows)
 ## Patch
-    00-qemu720-mesa-glide.patch - Patch for QEMU version 7.2x (MESA & Glide)
-    01-qemu620-mesa-glide.patch - Patch for QEMU version 6.2x (MESA & Glide)
-    02-qemu520-mesa-glide.patch - Patch for QEMU version 5.2x (MESA & Glide)
+    00-qemu82x-mesa-glide.patch - Patch for QEMU version 8.2.x (MESA & Glide)
+    01-qemu72x-mesa-glide.patch - Patch for QEMU version 7.2.x (MESA & Glide)
+    02-qemu620-mesa-glide.patch - Patch for QEMU version 6.2.0 (MESA & Glide)
 ## QEMU Windows Guests Glide/OpenGL/Direct3D Acceleration
 Witness, experience and share your thoughts on modern CPU/GPU prowess for retro Windows games on Apple Silicon macOS, Windows 10/11 and modern Linux. Most games can be installed and played in pristine condition without the hassle of hunting down unofficial, fan-made patches to play them on Windows 10/later or modern Linux/Wine.
 - YouTube channel (https://www.youtube.com/channel/UCl8InhZs1ixZBcLrMDSWd0A/videos)
@@ -20,27 +20,27 @@ Witness, experience and share your thoughts on modern CPU/GPU prowess for retro 
 Following instructions are based on `MSYS2/mingw-w64` BASH shell environment on Windows 10/11. It is meant to be simple and minor variations are inevitable due to different flavors of Linux distributions.
 
 Simple guide to apply the patch:<br>
-(using `00-qemu720-mesa-glide.patch`)
+(using `00-qemu82x-mesa-glide.patch`)
 
     $ mkdir ~/myqemu && cd ~/myqemu
     $ git clone https://github.com/kjliew/qemu-3dfx.git
     $ cd qemu-3dfx
-    $ wget https://download.qemu.org/qemu-7.2.0.tar.xz
-    $ tar xf qemu-7.2.0.tar.xz
-    $ cd qemu-7.2.0
+    $ wget https://download.qemu.org/qemu-8.2.1.tar.xz
+    $ tar xf qemu-8.2.1.tar.xz
+    $ cd qemu-8.2.1
     $ rsync -r ../qemu-0/hw/3dfx ../qemu-1/hw/mesa ./hw/
-    $ patch -p0 -i ../00-qemu720-mesa-glide.patch
+    $ patch -p0 -i ../00-qemu82x-mesa-glide.patch
     $ bash ../scripts/sign_commit
     $ mkdir ../build && cd ../build
-    $ ../qemu-7.2.0/configure && make
+    $ ../qemu-8.2.1/configure && make
 
 ## Building Guest Wrappers
 **Requirements:**
- - `base-devel` (make, sed, xxd)
+ - `base-devel` (make, sed, xxd etc.)
  - `gendef, shasum`
  - `mingw32` cross toolchain (`binutils, gcc, windres, dlltool`) for WIN32 DLL wrappers
- - `Watcom C/C++ 11.0` for DOS32 OVL wrapper
- - `i686-pc-msdosdjgpp` cross toolchain (`binutils, gcc, dxe3gen`) for DJGPP DXE wrappers
+ - `Open-Watcom-1.9/v2.0` or `Watcom C/C++ 11.0` for DOS32 OVL wrapper
+ - `{i586,i686}-pc-msdosdjgpp` cross toolchain (`binutils, gcc, dxe3gen`) for DJGPP DXE wrappers
 <br>
 
     $ cd ~/myqemu/qemu-3dfx/wrappers/3dfx
@@ -74,6 +74,7 @@ For $89.99 donation, you will deserve the following donor's privileges:
 - QEMU-enhanced OpenGLide **Host-side wrappers** built for platform of your choice (choose **ONE**: Windows 10/11, Ubuntu, etc.)
 - QEMU-enhanced [**WineD3D libraries for Win98/2K/ME/XP VMs**](https://www.winehq.org) for DirectDraw/Direct3D games up to DirectX 9.0c
 - Game controllers support with [**QEMU USB Gamepad**](https://github.com/kjliew/qemu-3dfx/wiki/QEMU-USB-Gamepad)
+- SDL2 clipboard sharing through built-in [**QEMU vdagent**](https://www.kraxel.org/blog/2021/05/qemu-cut-paste/)
 - OpenGLide **Guest-side wrappers** for Windows
 - Elect up to 5 games for priority support and your name as the honorary sponsor in the supported & tested list of games.
 

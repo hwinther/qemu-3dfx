@@ -3,6 +3,17 @@
 #include <GL/gl.h>
 #include <GL/glext.h>
 #include <GL/wgl.h>
+#ifdef HAVE_XTRA
+#include <sdk2_glide.h>
+/*
+** grGetString types
+*/
+#define GR_EXTENSION                    0xa0
+#define GR_HARDWARE                     0xa1
+#define GR_RENDERER                     0xa2
+#define GR_VENDOR                       0xa3
+#define GR_VERSION                      0xa4
+#endif
 
 static void MGLTmpContext(char **str, char **wstr)
 {
@@ -35,9 +46,6 @@ static void MGLTmpContext(char **str, char **wstr)
     BOOL (WINAPI *wglGetPixelFormatAttribivARB)(HDC, int, int, UINT, const int *, int *) =
         (BOOL (WINAPI *)(HDC, int, int, UINT, const int *, int *))
         wglGetProcAddress("wglGetPixelFormatAttribivARB");
-    void (WINAPI *p_glDebugMessageInsertARB)(int, int, UINT, int, size_t, const char *) =
-        (void (WINAPI *)(int, int, UINT, int, size_t, const char *))
-        wglGetProcAddress("glDebugMessageInsertARB");
 
     const int na[] = { WGL_NUMBER_PIXEL_FORMATS_ARB },
           piAttr[] = {
@@ -95,7 +103,7 @@ static void MGLTmpContext(char **str, char **wstr)
         const char *namestr;
         char *namebuf;
         namestr = (const char *)glGetString(strname[i].enm);
-        namebuf = HeapAlloc(GetProcessHeap(), 0, 1 + strlen(namestr));
+        namebuf = (namestr)? HeapAlloc(GetProcessHeap(), 0, 1 + strlen(namestr)):0;
         if (namestr && namebuf) {
             lstrcpy(namebuf, namestr);
             printf(strname[i].fmt, namebuf, 1 + strlen(namestr));
@@ -135,8 +143,8 @@ static void MGLTmpContext(char **str, char **wstr)
     const char *glstr = (const char *)glGetString(GL_EXTENSIONS),
               *wglstr = (const char *)wglGetString(tmpDC);
 
-    *str = HeapAlloc(GetProcessHeap(), 0, 1 + strlen(glstr));
-    *wstr = HeapAlloc(GetProcessHeap(), 0, 1 + strlen(wglstr));
+    *str = HeapAlloc(GetProcessHeap(), 0, (glstr)? (1 + strlen(glstr)):sizeof(void *));
+    *wstr = HeapAlloc(GetProcessHeap(), 0, (wglstr)? (1 + strlen(wglstr)):sizeof(void *));
     if (*str)
         lstrcpy(*str, glstr);
     if (*wstr)
@@ -144,12 +152,75 @@ static void MGLTmpContext(char **str, char **wstr)
 
     wglMakeCurrent(NULL, NULL);
     wglDeleteContext(tmpGL);
-#define MESAGL_MAGIC    0x5b5eb5e5
-    if (p_glDebugMessageInsertARB)
-        p_glDebugMessageInsertARB(GL_DEBUG_SOURCE_APPLICATION_ARB, GL_DEBUG_TYPE_ERROR_ARB,
-                MESAGL_MAGIC, -1, 0, 0);
     ReleaseDC(tmpWin, tmpDC);
     DestroyWindow(tmpWin);
+}
+
+void fxprobe(void)
+{
+#ifdef HAVE_XTRA
+    struct _pfn {
+        int (FX_CALL *sstQueryBoards)(void *);
+        int (FX_CALL *sstQueryHardware)(void *);
+        void (FX_CALL *glideGetVersion)(void *);
+        void (FX_CALL *glideInit)(void);
+        void (FX_CALL *glideShutdown)(void);
+        int (FX_CALL *texMinAddress)(int);
+        int (FX_CALL *texMaxAddress)(int);
+        const char *(FX_CALL *getString)(int);
+    } _fx;
+
+    HMODULE fx = LoadLibrary("glide2x.dll");
+    if (fx) {
+        _fx.sstQueryBoards = (int (FX_CALL *)(void *)) GetProcAddress(fx, "_grSstQueryBoards@4");
+        _fx.sstQueryHardware = (int (FX_CALL *)(void *)) GetProcAddress(fx, "_grSstQueryHardware@4");
+        _fx.glideInit = (void (FX_CALL *)(void)) GetProcAddress(fx, "_grGlideInit@0");
+        _fx.glideShutdown = (void (FX_CALL *)(void)) GetProcAddress(fx, "_grGlideShutdown@0");
+        _fx.glideGetVersion = (void (FX_CALL *)(void *)) GetProcAddress(fx, "_grGlideGetVersion@4");
+        _fx.texMinAddress = (int (FX_CALL *)(int)) GetProcAddress(fx, "_grTexMinAddress@4");
+        _fx.texMaxAddress = (int (FX_CALL *)(int)) GetProcAddress(fx, "_grTexMaxAddress@4");
+
+        GrHwConfiguration hwc;
+        char version[80];
+        const char *sstType[] = {
+            "VOODOO", "SST96", "AT3D", "Voodoo2",
+        };
+        if (_fx.sstQueryBoards(&hwc) && hwc.num_sst) {
+            _fx.glideInit();
+            _fx.glideGetVersion(version);
+            printf("\nnum_sst %d - %s\n", hwc.num_sst, version);
+            if (_fx.sstQueryHardware(&hwc)) {
+                for (int i = 0; i < hwc.num_sst; i++) {
+                    printf("  Board type: %s\n", sstType[hwc.SSTs[i].type]);
+                    printf("  FBI  rev %d: %2d MB\n", hwc.SSTs[i].sstBoard.VoodooConfig.fbiRev & 0xFU,
+                            hwc.SSTs[i].sstBoard.VoodooConfig.fbRam);
+                    for (int j = 0; j < hwc.SSTs[i].sstBoard.VoodooConfig.nTexelfx; j++)
+                        printf("  TMU%d rev %d: %2d MB addr %08x-%08x\n", j,
+                                hwc.SSTs[i].sstBoard.VoodooConfig.tmuConfig[j].tmuRev & 0xFU,
+                                hwc.SSTs[i].sstBoard.VoodooConfig.tmuConfig[j].tmuRam,
+                                _fx.texMinAddress(j), _fx.texMaxAddress(j));
+                    printf("  SLI detect: %s\n", (hwc.SSTs[i].sstBoard.VoodooConfig.sliDetect)? "Yes":"No");
+                }
+            }
+            _fx.glideShutdown();
+        }
+        FreeLibrary(fx);
+    }
+    fx = LoadLibrary("glide3x.dll");
+    if (fx) {
+        _fx.glideInit = (void (FX_CALL *)(void)) GetProcAddress(fx, "_grGlideInit@0");
+        _fx.glideShutdown = (void (FX_CALL *)(void)) GetProcAddress(fx, "_grGlideShutdown@0");
+        _fx.getString = (const char *(FX_CALL *)(int)) GetProcAddress(fx, "_grGetString@4");
+
+        _fx.glideInit();
+        printf("\n  Vendor    : %s %s\n", _fx.getString(GR_VENDOR), _fx.getString(GR_RENDERER));
+        printf("  Extension : %s\n", _fx.getString(GR_EXTENSION));
+        printf("  Hardware  : %s\n", _fx.getString(GR_HARDWARE));
+        printf("  Version   : %s\n", _fx.getString(GR_VERSION));
+        _fx.glideShutdown();
+        FreeLibrary(fx);
+    }
+#endif //HAVE_XTRA
 }
 
 int main()
@@ -162,6 +233,7 @@ int main()
         HeapFree(GetProcessHeap(), 0, str);
         HeapFree(GetProcessHeap(), 0, wstr);
     }
+    fxprobe();
     return 0;
 }
 

@@ -13,7 +13,9 @@
 #define INLINE inline
 #define PT_CALL __stdcall
 #define COMPACT __attribute__((optimize("Os")))
-#define COMPACT_FRAME COMPACT __attribute__((optimize("-fno-omit-frame-pointer")))
+#define COMPACT_FRAME COMPACT \
+    __attribute__((target("no-sse2"))) \
+    __attribute__((optimize("-fno-omit-frame-pointer")))
 #define LOG_NAME "C:\\WRAPGL32.LOG"
 #define TRACE_PNAME(p) \
     if ((logpname[p>>3] & (1<<(p%8))) == 0) { \
@@ -67,7 +69,7 @@ static int InitMesaPTMMBase(PDRVFUNC pDrv)
         return 1;
     mdata = &mfifo[MAX_FIFO];
     pt = &mfifo[1];
-    if (mfifo[1] == (uint32_t)(ptm + (0xFC0U >> 2)))
+    if ((mfifo[1] & 0xFFFU) == ((uint32_t)(ptm + (0xFC0U >> 2)) & 0xFFFU))
         return 1;
     mfifo[0] = FIRST_FIFO;
     mdata[0] = ALIGNED(1) >> 2;
@@ -453,6 +455,7 @@ struct mglOptions {
     int ovrdSync;
     int useMSAA;
     int useSRGB;
+    int bltFlip;
     int scalerOff;
     int vsyncOff;
     int xstrYear;
@@ -465,10 +468,19 @@ static int parse_value(const char *str, const char *tok, int *val)
         *val = strtol(str + strlen(tok), 0, 10);
     return ret;
 }
+static int display_device_supported(void)
+{
+    DISPLAY_DEVICE dd = { .cb = sizeof(DISPLAY_DEVICE) };
+    const char vidstr[] = "QEMU Bochs";
+    return (EnumDisplayDevices(NULL, 0, &dd, 0) &&
+        !memcmp(dd.DeviceString, vidstr, strlen(vidstr)))? 1:0;
+}
 static void parse_options(struct mglOptions *opt)
 {
     FILE *f = opt_fopen();
     memset(opt, 0, sizeof(struct mglOptions));
+    /* Sync host color cursor only for Bochs SVGA */
+    swapCur = display_device_supported();
     if (f) {
         char line[MAX_XSTR];
         int i, v;
@@ -483,23 +495,20 @@ static void parse_options(struct mglOptions *opt)
             opt->useMSAA = ((i == 1) && v)? ((v & 0x03U) << 2):opt->useMSAA;
             i = parse_value(line, "ContextSRGB,", &v);
             opt->useSRGB = ((i == 1) && v)? 1:opt->useSRGB;
+            i = parse_value(line, "ScalerBltFlip,", &v);
+            opt->bltFlip = ((i == 1) && v)? 0x12U:opt->bltFlip;
             i = parse_value(line, "RenderScalerOff,", &v);
             opt->scalerOff = ((i == 1) && v)? 2:opt->scalerOff;
             i = parse_value(line, "ContextVsyncOff,", &v);
             opt->vsyncOff = ((i == 1) && v)? 1:opt->vsyncOff;
             i = parse_value(line, "ExtensionsYear,", &v);
             opt->xstrYear = (i == 1)? v:opt->xstrYear;
-            i = parse_value(line, "HCursorSync,", &v);
-            swapCur = ((i == 1) && v)? 1:swapCur;
+            i = parse_value(line, "CursorSyncOff,", &v);
+            swapCur = ((i == 1) && v)? 0:swapCur;
             i = parse_value(line, "FpsLimit,", &v);
             swapFps = (i == 1)? (v & 0x7FU):swapFps;
         }
         fclose(f);
-        /* Sync host color cursor only for Bochs SVGA */
-        DISPLAY_DEVICE dd = { .cb = sizeof(DISPLAY_DEVICE) };
-        const char vidstr[] = "QEMU Bochs";
-        swapCur = (EnumDisplayDevices(NULL, 0, &dd, 0) &&
-            !memcmp(dd.DeviceString, vidstr, strlen(vidstr)))? swapCur:0;
     }
 }
 
@@ -1635,7 +1644,7 @@ void PT_CALL glColorMask(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t a
 }
 void PT_CALL glColorMaskIndexedEXT(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t arg4) {
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; pt[5] = arg4; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glColorMaskIndexedEXT;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glColorMaskIndexedEXT, 5);
 }
 void PT_CALL glColorMaski(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t arg4) {
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; pt[5] = arg4; 
@@ -2322,23 +2331,7 @@ void PT_CALL glDebugMessageInsertAMD(uint32_t arg0, uint32_t arg1, uint32_t arg2
     pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glDebugMessageInsertAMD;
 }
 void PT_CALL glDebugMessageInsertARB(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5) {
-    if ((arg0 == GL_DEBUG_SOURCE_APPLICATION_ARB) &&
-        (arg1 == GL_DEBUG_TYPE_ERROR_ARB) &&
-        (arg2 == MESAGL_MAGIC)) {
-        if ((mdata[1] + arg3) == 0)
-            return;
-        char str[] = "MGLRefcount xxxxx reset";
-        snprintf(str, sizeof(str), "MGLRefcount %04x reset", mdata[1]);
-        mdata[1] = 1;
-        arg0 = GL_DEBUG_SOURCE_OTHER_ARB;
-        arg1 = GL_DEBUG_TYPE_OTHER_ARB;
-        arg2 = GL_DEBUG_SEVERITY_LOW_ARB;
-        arg4 = strlen(str) + 1;
-        arg5 = (uint32_t)str;
-        fifoAddData(0, arg5, arg4);
-    }
-    else
-        fifoAddData(0, arg5, arg4);
+    fifoAddData(0, arg5, arg4);
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; pt[5] = arg4; pt[6] = arg5; 
     pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glDebugMessageInsertARB;
 }
@@ -2637,7 +2630,7 @@ void PT_CALL glDisableClientStateiEXT(uint32_t arg0, uint32_t arg1) {
 }
 void PT_CALL glDisableIndexedEXT(uint32_t arg0, uint32_t arg1) {
     pt[1] = arg0; pt[2] = arg1; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glDisableIndexedEXT;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glDisableIndexedEXT, 2);
 }
 void PT_CALL glDisableVariantClientStateEXT(uint32_t arg0) {
     pt[1] = arg0; 
@@ -3283,7 +3276,7 @@ void PT_CALL glEnableClientStateiEXT(uint32_t arg0, uint32_t arg1) {
 }
 void PT_CALL glEnableIndexedEXT(uint32_t arg0, uint32_t arg1) {
     pt[1] = arg0; pt[2] = arg1; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glEnableIndexedEXT;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glEnableIndexedEXT, 2);
 }
 void PT_CALL glEnableVariantClientStateEXT(uint32_t arg0) {
     pt[1] = arg0; 
@@ -5701,8 +5694,11 @@ void PT_CALL glGetTextureSubImage(uint32_t arg0, uint32_t arg1, uint32_t arg2, u
     pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glGetTextureSubImage;
 }
 void PT_CALL glGetTrackMatrixivNV(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3) {
+    uint32_t n;
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; 
     pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glGetTrackMatrixivNV;
+    fifoOutData(0, (uint32_t)&n, sizeof(uint32_t));
+    fifoOutData(ALIGNED(sizeof(uint32_t)), arg3, n*sizeof(int));
 }
 void PT_CALL glGetTransformFeedbackVarying(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t arg4, uint32_t arg5, uint32_t arg6) {
     uint32_t n, e;
@@ -6452,9 +6448,12 @@ uint32_t PT_CALL glIsEnabled(uint32_t arg0) {
     ret = *pt0;
     return ret;
 }
-void PT_CALL glIsEnabledIndexedEXT(uint32_t arg0, uint32_t arg1) {
+uint32_t PT_CALL glIsEnabledIndexedEXT(uint32_t arg0, uint32_t arg1) {
+    uint32_t ret;
     pt[1] = arg0; pt[2] = arg1; 
     pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glIsEnabledIndexedEXT;
+    ret = *pt0;
+    return ret;
 }
 uint32_t PT_CALL glIsEnabledi(uint32_t arg0, uint32_t arg1) {
     uint32_t ret;
@@ -6816,7 +6815,9 @@ void PT_CALL glLoadName(uint32_t arg0) {
     pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glLoadName, 1);
 }
 void PT_CALL glLoadProgramNV(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3) {
-    fifoAddData(0, arg3, arg2);
+    const int strz[2] = {0, 0};
+    fifoAddData(0, arg3, ALIGNED(arg2));
+    fifoAddData(0, (uint32_t)strz, ALIGNED(1));
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; 
     pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glLoadProgramNV, 4);
 }
@@ -8869,7 +8870,9 @@ void PT_CALL glProgramPathFragmentInputGenNV(uint32_t arg0, uint32_t arg1, uint3
     pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glProgramPathFragmentInputGenNV;
 }
 void PT_CALL glProgramStringARB(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3) {
+    const int strz[2] = {0, 0};
     fifoAddData(0, arg3, ALIGNED(arg2));
+    fifoAddData(0, (uint32_t)strz, ALIGNED(1));
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; 
     pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glProgramStringARB, 4);
 }
@@ -10531,7 +10534,7 @@ void PT_CALL glTexBufferEXT(uint32_t arg0, uint32_t arg1, uint32_t arg2) {
 }
 void PT_CALL glTexBufferRange(uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3, uint32_t arg4) {
     pt[1] = arg0; pt[2] = arg1; pt[3] = arg2; pt[4] = arg3; pt[5] = arg4; 
-    pt0 = (uint32_t *)pt[0]; *pt0 = FEnum_glTexBufferRange;
+    pt0 = (uint32_t *)pt[0]; FIFO_GLFUNC(FEnum_glTexBufferRange, 5);
 }
 void PT_CALL glTexBumpParameterfvATI(uint32_t arg0, uint32_t arg1) {
     pt[1] = arg0; pt[2] = arg1; 
@@ -16615,6 +16618,7 @@ static uint32_t PT_CALL wglSwapIntervalEXT (uint32_t arg0)
     parse_options(&cfg);
     WGL_FUNCP("wglSwapIntervalEXT");
     argsp[0] = (cfg.vsyncOff)? 0:arg0;
+    swapFps = (argsp[0] > 0)? 0x7FU:swapFps;
     ptm[0xFDC >> 2] = MESAGL_MAGIC;
     WGL_FUNCP_RET(ret);
     return ret;
@@ -16924,7 +16928,12 @@ static void wglFreeMemoryNV(void *pointer) { }
 static void WINAPI
 wglSetDeviceCursor3DFX(HCURSOR hCursor)
 {
+    static HCURSOR last_cur;
     ICONINFO ic;
+
+    if (!swapCur || (last_cur == hCursor))
+        return;
+
     BOOL (WINAPI *p_DeleteObject)(HANDLE) = (BOOL (WINAPI *)(HANDLE))
         GetProcAddress(GetModuleHandle("gdi32.dll"), "DeleteObject");
     int (WINAPI *p_GetDIBits)(HDC, HBITMAP, UINT, UINT, LPVOID, LPBITMAPINFO, UINT) =
@@ -16936,24 +16945,32 @@ wglSetDeviceCursor3DFX(HCURSOR hCursor)
         unsigned char binfo[SIZE_BMPINFO];
         BITMAPINFO *pbmi = (BITMAPINFO *)binfo;
         HDC hdc = GetDC(GLwnd);
+        HBITMAP hBmp = (ic.hbmColor)? ic.hbmColor:ic.hbmMask;
         memset(pbmi, 0, SIZE_BMPINFO);
         pbmi->bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         pbmi->bmiHeader.biPlanes = 1;
-        if (hdc && ic.hbmColor && p_GetDIBits(hdc, ic.hbmColor, 0, 0, NULL, pbmi, DIB_RGB_COLORS) &&
-            (pbmi->bmiHeader.biSizeImage == (32 * 32 * sizeof(uint32_t))) &&
-            (pbmi->bmiHeader.biBitCount == 32) &&
+        if (hdc && hBmp && p_GetDIBits(hdc, hBmp, 0, 0, NULL, pbmi, DIB_RGB_COLORS) &&
             (pbmi->bmiHeader.biWidth > ic.xHotspot) &&
             (pbmi->bmiHeader.biHeight > ic.yHotspot)) {
             WGL_FUNCP("wglSetDeviceCursor3DFX");
+            uint32_t *data = &fbtm[(MGLFBT_SIZE - pbmi->bmiHeader.biSizeImage) >> 2];
             argsp[0] = ic.xHotspot;
             argsp[1] = ic.yHotspot;
             argsp[2] = pbmi->bmiHeader.biWidth;
             argsp[3] = pbmi->bmiHeader.biHeight;
             pbmi->bmiHeader.biHeight = 0 - pbmi->bmiHeader.biHeight;
-            p_GetDIBits(hdc, ic.hbmColor, 0, argsp[3],
-                &fbtm[(MGLFBT_SIZE - pbmi->bmiHeader.biSizeImage) >> 2],
-                pbmi, DIB_RGB_COLORS);
+            p_GetDIBits(hdc, hBmp, 0, argsp[3], data, pbmi, DIB_RGB_COLORS);
+            ReleaseDC(GLwnd, hdc);
+            if (pbmi->bmiHeader.biBitCount == 1)
+                argsp[3] |= 1;
+            if (pbmi->bmiHeader.biBitCount > 16)
+#define ALPHA_MASK 0xFF000000U
+#define COLOR_MASK 0x00FFFFFFU
+                for (int i = 0; i < (pbmi->bmiHeader.biSizeImage >> 2); i++)
+                    data[i] = (data[i] && (data[i] ^ COLOR_MASK))?
+                        (data[i] | ALPHA_MASK):COLOR_MASK;
             ptm[0xFDC >> 2] = MESAGL_MAGIC;
+            last_cur = hCursor;
         }
     }
     if (p_DeleteObject) {
@@ -17273,13 +17290,13 @@ uint32_t PT_CALL mglUseFontOutlinesW(uint32_t arg0, uint32_t arg1, uint32_t arg2
 
 int WINAPI wglSwapBuffers (HDC hdc)
 {
-    static HCURSOR hcur;
     static POINT last_pos;
     static uint32_t timestamp;
     uint32_t ret, *swapRet = &mfifo[(MGLSHM_SIZE - ALIGNED(1)) >> 2];
     uint32_t t = GetTickCount();
     CURSORINFO ci = { .cbSize = sizeof(CURSORINFO) };
-    if (((t - timestamp) > (1000/60)) && GetCursorInfo(&ci)) {
+    if (((t - timestamp) >= 16) &&
+            display_device_supported() && GetCursorInfo(&ci)) {
         if (ci.flags != CURSOR_SHOWING)
             memset(&last_pos, 0, sizeof(POINT));
         else {
@@ -17296,10 +17313,7 @@ int WINAPI wglSwapBuffers (HDC hdc)
                 ci.ptScreenPos.y = MulDiv(ci.ptScreenPos.y, GetSystemMetrics(SM_CYSCREEN) - 1,
                         (wr.bottom - wr.top - 1));
                 memcpy(&last_pos, &ci.ptScreenPos, sizeof(POINT));
-                if (swapCur && hcur != ci.hCursor) {
-                    hcur = ci.hCursor;
-                    wglSetDeviceCursor3DFX(hcur);
-                }
+                wglSetDeviceCursor3DFX(ci.hCursor);
             }
         }
     }
@@ -17329,7 +17343,7 @@ int WINAPI mglSwapLayerBuffers(HDC hdc, UINT arg1) { return wgdSwapBuffers(hdc);
 #define PPFD_CONFIG() \
     struct mglOptions cfg; \
     parse_options(&cfg); \
-    xppfd[0] = cfg.useMSAA | cfg.scalerOff | cfg.bufoAcc; \
+    xppfd[0] = cfg.bltFlip | cfg.useMSAA | cfg.scalerOff | cfg.bufoAcc; \
     xppfd[1] = (cfg.dispTimerMS & 0x8000U)? (cfg.dispTimerMS & 0x7FFFU):DISPTMR_DEFAULT
 
 int WINAPI wglChoosePixelFormat(HDC hdc, const PIXELFORMATDESCRIPTOR *ppfd)
@@ -17387,15 +17401,19 @@ wglSetPixelFormat(HDC hdc, int format, const PIXELFORMATDESCRIPTOR *ppfd)
 {
     uint32_t ret, *rsp, *xppfd;
     asm volatile("lea 0x04(%%ebp), %0;":"=rm"(rsp));
-    ret = (rsp[5] == rsp[1])? rsp[4]:((rsp[9] == rsp[1])? rsp[8]:rsp[0]);
+    ret = ((rsp[5] == rsp[1]) && (rsp[6] == rsp[2]))? rsp[4]:
+          ((rsp[9] == rsp[1])? rsp[8]:rsp[0]);
     HookDeviceGammaRamp(ret);
     HookTimeGetTime(ret);
+    if (!hdc && !format)
+        return 0;
     if (currGLRC) {
         mglMakeCurrent(0, 0);
         mglDeleteContext(MESAGL_MAGIC);
     }
     xppfd = &mfifo[(MGLSHM_SIZE - PAGE_SIZE) >> 2];
     xppfd[0] = format;
+    xppfd[1] = (uint32_t)ptm;
     memset(&xppfd[2], 0, sizeof(PIXELFORMATDESCRIPTOR));
     if (ppfd)
         memcpy(&xppfd[2], ppfd, sizeof(PIXELFORMATDESCRIPTOR));
@@ -17407,6 +17425,27 @@ wglSetPixelFormat(HDC hdc, int format, const PIXELFORMATDESCRIPTOR *ppfd)
 BOOL WINAPI COMPACT
 wgdSetPixelFormat(HDC hdc, int format, const PIXELFORMATDESCRIPTOR *ppfd)
 { return wglSetPixelFormat(hdc, format, ppfd); }
+
+static void mglSetAffinity(void)
+{
+    const char *ThreadAffinity[] = {
+        "Unigine_x86",
+        0,
+    };
+    int i;
+    for (i = 0; ThreadAffinity[i]; i++) {
+        if (GetModuleHandle(ThreadAffinity[i]))
+            break;
+    }
+    DWORD affinityMask[2];
+    GetProcessAffinityMask(GetCurrentProcess(), &affinityMask[0], &affinityMask[1]);
+    if (ThreadAffinity[i])
+        SetThreadAffinityMask(GetCurrentThread(), (1 << ((GetCurrentThreadId() >> 2) &
+                        ((sizeof(DWORD) << 3) - __builtin_clz(affinityMask[0]) - 1))));
+    else
+        SetProcessAffinityMask(GetCurrentProcess(), (1 << ((GetCurrentProcessId() >> 2) &
+                        ((sizeof(DWORD) << 3) - __builtin_clz(affinityMask[0]) - 1))));
+}
 
 LRESULT CALLBACK CallWndProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
@@ -17438,10 +17477,7 @@ BOOL APIENTRY DllMain( HINSTANCE hModule,
     GetVersionEx(&osInfo);
     HookPatchfxCompat(osInfo.dwPlatformId);
     if (osInfo.dwPlatformId == VER_PLATFORM_WIN32_NT) {
-        DWORD affinityMask[2];
-        GetProcessAffinityMask(GetCurrentProcess(), &affinityMask[0], &affinityMask[1]);
-        SetThreadAffinityMask(GetCurrentThread(), (1 << ((GetCurrentThreadId() >> 2) &
-                        ((sizeof(DWORD) << 3) - __builtin_clz(affinityMask[0]) - 1))));
+        mglSetAffinity();
         kmdDrvInit(&drv);
     }
     else

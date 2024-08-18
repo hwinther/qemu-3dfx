@@ -83,6 +83,7 @@ typedef struct MesaPTState
     int BufIdx;
     uint32_t szUsedBuf;
     QEMUTimer *dispTimer;
+    int64_t crashRC;
     PERFSTAT perfs;
 
 } MesaPTState;
@@ -351,8 +352,7 @@ static void InitClientStates(MesaPTState *s)
     s->pixPackBuf = 0; s->pixUnpackBuf = 0;
     s->szPackWidth = 0; s->szUnpackWidth = 0;
     s->szPackHeight = 0; s->szUnpackHeight = 0;
-    if (s->mglCntxWGL)
-        GLExtUncapped();
+    GLExtUncapped(s->mglCntxWGL);
 }
 
 static void dispTimerProc(void *opaque)
@@ -362,11 +362,13 @@ static void dispTimerProc(void *opaque)
     MGLActivateHandler(0, 1);
 }
 
-static void dispTimerSched(QEMUTimer *ts)
+static void dispTimerSched(QEMUTimer *ts, int64_t *crashRC)
 {
     int timer_ms = (ts)? GetDispTimerMS():0;
     if (timer_ms)
         timer_mod(ts, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + timer_ms);
+    if (crashRC)
+        *crashRC = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 }
 
 static uint64_t mesapt_read(void *opaque, hwaddr addr, unsigned size)
@@ -1174,6 +1176,7 @@ static void processArgs(MesaPTState *s)
         case FEnum_glGetFramebufferAttachmentParameterivEXT:
         case FEnum_glGetTexLevelParameterfv:
         case FEnum_glGetTexLevelParameteriv:
+        case FEnum_glGetTrackMatrixivNV:
             *(int *)outshm = szglname(s->arg[2]);
             s->parg[3] = VAL(PTR(outshm, ALIGNED(sizeof(uint32_t))));
             break;
@@ -1237,7 +1240,7 @@ static void processArgs(MesaPTState *s)
             break;
         case FEnum_glLoadProgramNV:
         case FEnum_glProgramStringARB:
-            s->datacb = ALIGNED(s->arg[2]);
+            s->datacb = ALIGNED(1) + ALIGNED(s->arg[2]);
             s->parg[3] = VAL(s->hshm);
             if (GLShaderDump()) {
                 DPRINTF("--------- ProgramString %04x ------>>>>", s->arg[1]);
@@ -1915,7 +1918,7 @@ static void processFRet(MesaPTState *s)
         case FEnum_glFinish:
         case FEnum_glFlush:
             MGLActivateHandler(1, 0);
-            dispTimerSched(s->dispTimer);
+            dispTimerSched(s->dispTimer, &s->crashRC);
             break;
         case FEnum_glMapBuffer:
         case FEnum_glMapBufferARB:
@@ -2079,7 +2082,7 @@ static void processFRet(MesaPTState *s)
                         "WGL_3DFX_gamma_control"
                         ;
 #define XSTR_ADD(s) { \
-    size_t len = strnlen(s, sizeof(s)); \
+    len = strnlen(s, sizeof(s)); \
     memcpy(xbuf, s, len); \
     xbuf += len; \
     *(xbuf++) = ' '; }
@@ -2303,7 +2306,7 @@ static void mesapt_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
                         DPRINTF("Guest GL Extensions pass-through for Year %s Length %s",
                                 (s->extnYear)? xYear:"ALL", (s->extnLength)? xLen:"ANY");
                         s->dispTimer = (disptmr)? timer_new_ms(QEMU_CLOCK_VIRTUAL, dispTimerProc, s):0;
-                        dispTimerSched(s->dispTimer);
+                        dispTimerSched(s->dispTimer, &s->crashRC);
                     }
                     else {
                         static int lvl_prev;
@@ -2338,10 +2341,11 @@ static void mesapt_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
                 s->perfs.stat();
                 do {
                     uint32_t *swapRet = (uint32_t *)(s->fifo_ptr + (MGLSHM_SIZE - ALIGNED(1)));
-                    DPRINTF_COND(SwapFpsLimit(swapRet[0]), "Guest GL Swap limit [ %d FPS ]", GetFpsLimit());
+                    DPRINTF_COND((SwapFpsLimit(swapRet[0]) && swapRet[0] != 0x7FU),
+                            "Guest GL Swap limit [ %d FPS ]", GetFpsLimit());
                     swapRet[0] = MGLSwapBuffers()? ((GetFpsLimit() << 1) | 1):0;
                     MGLMouseWarp(swapRet[1]);
-                    dispTimerSched(s->dispTimer);
+                    dispTimerSched(s->dispTimer, &s->crashRC);
                 } while(0);
                 break;
             case 0xFEC:
@@ -2349,10 +2353,12 @@ static void mesapt_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
     int enable = (*(int *)ppfd) & 0x01U, \
         disable = (*(int *)ppfd) & 0x02U, \
         msaa = (*(int *)ppfd) & 0x0CU, \
+        flip = (*(int *)ppfd) & 0x10U, \
         msec = *(int *)PTR(ppfd, sizeof(int)); \
     GLBufOAccelCfg(enable); \
     GLRenderScaler(disable); \
     GLContextMSAA(msaa); \
+    GLBlitFlip(flip); \
     GLDispTimerCfg(msec)
                 do {
                     uint8_t *ppfd = s->fifo_ptr + (MGLSHM_SIZE - PAGE_SIZE);
@@ -2371,10 +2377,21 @@ static void mesapt_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
                 break;
             case 0xFE4:
                 do {
+                    int64_t curr_ts = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
                     uint8_t *ppfd = s->fifo_ptr + (MGLSHM_SIZE - PAGE_SIZE);
                     int pixfmt = *(int *)ppfd;
+                    int ptm = *(int *)PTR(ppfd, sizeof(int));
                     s->procRet = MGLSetPixelFormat(pixfmt, PTR(ppfd, ALIGNED(sizeof(int))))?
                         (((uint32_t*)s->fifo_ptr)[1]? MESAGL_MAGIC:0):0;
+                    if ((curr_ts - s->crashRC) > MESAGL_CRASH_RC) {
+                        uint32_t *fifoptr = (uint32_t *)s->fifo_ptr,
+                                 *dataptr = (uint32_t *)(s->fifo_ptr + (MAX_FIFO << 2));
+                        if ((fifoptr[1] & 0xFFFFF000U) != ptm) {
+                            DPRINTF("..warped %08x-%08x", fifoptr[1] & 0xFFFFF000U, ptm);
+                            fifoptr[1] = (fifoptr[1] & 0xFFFU) | ptm;
+                        }
+                        DPRINTF_COND((dataptr[1] > 1), "..reset refcnt %04x", dataptr[1]--);
+                    }
                 } while(0);
                 break;
             case 0xFE0:
@@ -2406,7 +2423,9 @@ static void mesapt_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
                     }
                     if (strncmp((const char *)func, "wglSetDeviceCursor3DFX", 64) == 0) {
                         uint32_t *argsp = (uint32_t *)(func + ALIGNED(strnlen((const char *)func, 64)));
-                        uint8_t *data = s->fbtm_ptr + (MGLFBT_SIZE - ALIGNED(argsp[2] * argsp[3] * sizeof(uint32_t)));
+                        uint8_t *data = (argsp[3] & 1)?
+                            s->fbtm_ptr + (MGLFBT_SIZE - ALIGNED(argsp[2] *(argsp[3] >> 3))):
+                            s->fbtm_ptr + (MGLFBT_SIZE - ALIGNED(argsp[2] * argsp[3] * sizeof(uint32_t)));
                         MGLCursorDefine(argsp[0], argsp[1], argsp[2], argsp[3], data);
                     }
                 } while(0);
@@ -2418,7 +2437,7 @@ static void mesapt_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
                         DPRINTF_COND((GLFuncTrace()), "ActivateHandler %d", i[0]);
                         MGLActivateHandler(i[0], 0);
                         if (i[0])
-                            dispTimerSched(s->dispTimer);
+                            dispTimerSched(s->dispTimer, &s->crashRC);
                     }
                 } while(0);
                 break;
