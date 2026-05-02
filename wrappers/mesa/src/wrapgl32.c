@@ -16669,7 +16669,7 @@ static uint32_t PT_CALL wglGetExtensionsStringARB(uint32_t arg0)
     };
     WGL_FUNCP("wglGetExtensionsStringARB");
     ptm[0xFDC >> 2] = MESAGL_MAGIC;
-    strncpy((char *)wstrtbl[0], (char *)&mfifo[(MGLSHM_SIZE - PAGE_SIZE) >> 2], PAGE_SIZE);
+    strncpy((char *)wstrtbl[0], (char *)&mfifo[(MGLSHM_SIZE - PAGE_SIZE) >> 2], PAGE_SIZE - 1);
     fltrxstr(wstrtbl[0], PAGE_SIZE - 1, "+WGL_");
     //DPRINTF("GetExtensionsStringARB %s", wstrtbl[0]);
     return (uint32_t)wstrtbl[0];

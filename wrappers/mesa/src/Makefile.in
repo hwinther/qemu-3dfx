@@ -6,7 +6,7 @@ RC=windres
 DLLTOOL=dlltool
 STRIP=strip
 CFLAGS=-march=x86-64-v2 -mtune=generic -mfpmath=sse -O3
-CFLAGS+=-pipe -I$(QEMU_SRC_DIR)/hw/mesa -I$(FXLIB) -Wall -Werror -flto=auto -fomit-frame-pointer
+CFLAGS+=-pipe -I$(QEMU_SRC_DIR)/hw/mesa -I$(FXLIB) -Wall -Werror -fomit-frame-pointer
 LDFLAGS=-static-libgcc
 LDFLAGS+=-Wl,--disable-auto-image-base,--no-seh,--dynamicbase,--nxcompat
 SRCDIR=../src
@@ -45,9 +45,9 @@ $(TOOLS):
 	@$(CC) $(CFLAGS) -s -o $@ $(SRCDIR)/wglinfo.c $(LDFLAGS) -lgdi32 -lopengl32
 
 stamp.o:
-	@git rev-parse --short HEAD | sed "s/\(.*\)/const\ char\ rev_\[\]\ =\ \"\1\-\";/" > /tmp/$(@:o=c)
-	@echo -n "  REV $@"; cat /tmp/$(@:o=c) | sed "s/.*rev_\[\]\ =//;s/;//"
-	@$(CC) -c -o $@ /tmp/$(@:o=c)
+	@git rev-parse --short HEAD | sed "s/\(.*\)/const\ char\ rev_\[\]\ =\ \"\1\-\";/" >$(@:o=c)
+	@echo -n "  REV $@"; cat $(@:o=c) | sed "s/.*rev_\[\]\ =//;s/;//"
+	@$(CC) -c -o $@ $(@:o=c)
 
 fxlib:
 	@if [ "$$MSYSTEM" != "MINGW32" ]; then echo "Error: MSYSTEM == $$MSYSTEM"; exit 1; fi
@@ -61,7 +61,7 @@ fxlib:
 	@$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	@rm -f *.o *.def
+	@rm -f stamp.c *.o *.def
 	@if [ -f $(TARGET) ]; then \
 	    $(STRIP) --strip-unneeded $(TARGET); \
 	    sh -c 'ls -l $(TARGET)'; \

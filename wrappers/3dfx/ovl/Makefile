@@ -18,13 +18,11 @@ glideovl.obj: glideovl.c
 	@git rev-parse --short HEAD | sed "s/\(.*\)/\#define\ __REV__\ \"\1\-\"/" > stamp.h
 	@echo "  WCC $@"
 	@if [ x`uname | sed "s/_.*//"` == xMINGW32 ]; then \
-		INCLUDES=`echo $(INCLUDES) | sed "s/\//\\\\\/g"`; \
-		$(WCC) `echo $$INCLUDES` $(CFLAGS) $<; else \
+		$(WCC) $(subst /,\\\\,$(INCLUDES)) $(CFLAGS) $<; else \
 		$(WCC) $(INCLUDES) $(CFLAGS) -fo=$@ $<; fi
-	@rm stamp.h
 
 clean:
-	@rm -f *.map *.obj *.err *.ovl
+	@rm -f stamp.h *.map *.obj *.err *.ovl
 	
 distclean: clean
 	@rm -f ../$(OUTDIR)/*.ovl
